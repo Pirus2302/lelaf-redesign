@@ -1,0 +1,3 @@
+# внутренние файлы, не для публичного репозитория
+assets/gl/*.src.html
+getlayers.json
