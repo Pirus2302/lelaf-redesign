@@ -21,8 +21,10 @@
   .vsw a[aria-current]{opacity:1;background:${dark ? '#fff' : '#2e4435'};color:${dark ? '#0a1413' : '#fff'}}
   .vsw span{padding:0 8px 0 12px;opacity:.55;font-weight:500}
   .vsw .all{font-size:16px;padding:0 10px}
+  .vsw{transition:opacity .25s}
+  .vsw.top{top:104px;bottom:auto;left:clamp(16px,3.4vw,48px)}
   ${dark ? '@media (max-width:1180px){.vsw{bottom:88px}}' : ''}
-  @media (max-width:760px){.vsw{left:10px;bottom:${dark ? '88px' : '12px'}}.vsw span{display:none}}
+  @media (max-width:760px){.vsw{left:10px;bottom:${dark ? '88px' : '12px'}}.vsw.top{top:84px;left:14px}.vsw span{display:none}}
   @media print{.vsw{display:none}}`
   document.head.appendChild(css)
 
@@ -41,4 +43,17 @@
     bar.appendChild(a)
   })
   document.body.appendChild(bar)
+
+  // WOW: первый экран занят по низу – пока нижняя навигация скрыта, плашка стоит под шапкой
+  const dock = document.getElementById('dock')
+  if (dark && dock) {
+    const place = () => {
+      const top = !dock.classList.contains('on')
+      if (bar.classList.contains('top') === top) return
+      bar.style.opacity = '0'
+      setTimeout(() => { bar.classList.toggle('top', top); bar.style.opacity = '' }, 250)
+    }
+    bar.classList.add('top')
+    new MutationObserver(place).observe(dock, { attributes: true, attributeFilter: ['class'] })
+  }
 })()
