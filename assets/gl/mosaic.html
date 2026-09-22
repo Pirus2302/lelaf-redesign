@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scene · Cubic Gradient</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #ffffff; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  /* UI PANEL — remove this block to drop the controls */
+  #ui-panel { position: fixed; top: 12px; right: 12px; background: rgba(10,10,12,.75); color: #fff;
+    font: 11px/1.4 -apple-system, system-ui, sans-serif; padding: 8px 10px; border: 1px solid rgba(255,255,255,.12);
+    border-radius: 6px; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    max-width: 240px; max-height: 80vh; overflow: auto; z-index: 1000; user-select: none; }
+  #ui-toggle { background: none; border: none; color: #fff; cursor: pointer; font-size: 14px; padding: 0; }
+  #ui-body { display: none; margin-top: 6px; }
+  #ui-panel.-open #ui-body { display: block; }
+  #ui-body label { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 4px 0; }
+  #ui-body input[type=color] { width: 28px; height: 20px; border: 1px solid rgba(255,255,255,.2); border-radius: 3px; padding: 0; background: none; cursor: pointer; }
+  #ui-body input[type=range] { width: 110px; }
+  #ui-buttons { display: flex; gap: 6px; margin-top: 8px; }
+  #ui-buttons button { flex: 1; cursor: pointer; background: rgba(255,255,255,.08); color: #fff;
+    border: 1px solid rgba(255,255,255,.18); border-radius: 4px; padding: 5px 6px; font: 11px/1 sans-serif; }
+  #ui-buttons button:hover { background: rgba(255,255,255,.16); }
+  #ui-snapshot { margin: 8px 0 0; padding: 6px 8px; background: rgba(255,255,255,.05);
+    border: 1px solid rgba(255,255,255,.12); border-radius: 4px;
+    font: 10px/1.45 ui-monospace, 'SF Mono', Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word; color: rgba(255,255,255,.88);
+    max-height: 240px; overflow: auto; user-select: text; cursor: text; }
+  /* END UI PANEL */
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.143.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.143.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<!-- UI PANEL — remove this block to drop the controls -->
+<div id="ui-panel" hidden>
+  <button id="ui-toggle" type="button" aria-label="Toggle controls">⚙ controls</button>
+  <div id="ui-body"></div>
+  <pre id="ui-snapshot" title="Click to select, then copy. These are the current CONFIG values."></pre>
+</div>
+<!-- END UI PANEL -->
+
+<script type="module">
+import * as THREE from 'three'
+
+/* ============================================================
+   CONFIG  — every tweakable value lives here. Colors are '#rrggbb'
+   strings; everything else is a number. The UI panel + localStorage
+   persistence are generated from these keys.
+============================================================ */
+const CONFIG = {
+  colLight: '#ffffff',
+  colGreen: '#5f9a74',
+  colDeep: '#2e4435',
+  grid: 26,
+  rounding: 0.2,
+  gap: 0.105,
+  edgeSoft: 0.016,
+  flowSpeed: 0.19,
+  flowScale: 5,
+  warp: 1.36,
+  greenBias: 0.06,
+  contrast: 1.16,
+  gloss: 0.5,
+  seam: 0.2,
+  glowAmt: 0.1,
+  glowRadius: 0.24,
+  brightness: 1.04,
+}
+
+/* ---------- DEFAULTS + localStorage (load BEFORE building the scene) ---------- */
+const DEFAULTS = JSON.parse(JSON.stringify(CONFIG))
+const STORAGE_KEY = 'getlayers:cubic-gradient'           // <- unique per scene
+/* сохранённые настройки не подмешиваем */
+function saveConfig() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(CONFIG)) } catch (e) {} }
+
+function hexToVec3(hex) {
+  const n = parseInt(hex.slice(1), 16)
+  return new THREE.Vector3(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255)
+}
+
+/* ---------- RENDERER / SCENE / CAMERA (fullscreen quad — no projection) ---------- */
+const canvas = document.getElementById('scene')
+const renderer = new THREE.WebGL1Renderer({ canvas, antialias: true })
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
+const scene = new THREE.Scene()
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+
+/* ============================================================
+   SCENE: CUBIC GRADIENT — a frosted-glass mosaic. A flowing
+   white→green field (domain-warped fbm + a slow diagonal drift)
+   is sampled per grid cell to paint a grid of soft rounded "cube"
+   tiles, while the continuous field shows through the seams for the
+   blurred look between tiles. Each tile gets a glassy sheen + bevel.
+   The pointer carries a green glow; a click sends a ripple of green
+   expanding across the mosaic.
+============================================================ */
+// ripple pool — each click writes a new slot, so many ripples run at once
+const NRIPPLE = 12
+let rippleIdx = 0
+const ripplePos = Array.from({ length: NRIPPLE }, () => new THREE.Vector2(0.5, 0.5))
+const rippleT = new Array(NRIPPLE).fill(-10)
+
+const uniforms = {
+  iTime:       { value: 0 },
+  iResolution: { value: new THREE.Vector2(1, 1) },
+  uMouse:      { value: new THREE.Vector2(0.7, 0.4) },
+  uRipplePos:  { value: ripplePos },
+  uRippleT:    { value: rippleT },
+  uEnergy:     { value: 0 },
+  uLight:      { value: hexToVec3(CONFIG.colLight) },
+  uGreen:      { value: hexToVec3(CONFIG.colGreen) },
+  uDeep:       { value: hexToVec3(CONFIG.colDeep) },
+  uGrid:       { value: CONFIG.grid },
+  uRound:      { value: CONFIG.rounding },
+  uGap:        { value: CONFIG.gap },
+  uSoft:       { value: CONFIG.edgeSoft },
+  uFlowSpeed:  { value: CONFIG.flowSpeed },
+  uFlowScale:  { value: CONFIG.flowScale },
+  uWarp:       { value: CONFIG.warp },
+  uGreenBias:  { value: CONFIG.greenBias },
+  uContrast:   { value: CONFIG.contrast },
+  uGloss:      { value: CONFIG.gloss },
+  uSeam:       { value: CONFIG.seam },
+  uGlow:       { value: CONFIG.glowAmt },
+  uGlowRad:    { value: CONFIG.glowRadius },
+  uBright:     { value: CONFIG.brightness },
+}
+
+const material = new THREE.ShaderMaterial({
+  uniforms,
+  vertexShader: `void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    precision highp float;
+    #define NRIPPLE 12
+    uniform float iTime;
+    uniform vec2  iResolution, uMouse;
+    uniform vec2  uRipplePos[NRIPPLE];
+    uniform float uRippleT[NRIPPLE];
+    uniform float uEnergy;
+    uniform vec3  uLight, uGreen, uDeep;
+    uniform float uGrid, uRound, uGap, uSoft, uFlowSpeed, uFlowScale, uWarp, uGreenBias, uContrast, uGloss, uSeam, uGlow, uGlowRad, uBright;
+
+    float hash(vec2 p){ p = fract(p * vec2(123.34, 345.45)); p += dot(p, p + 34.345); return fract(p.x * p.y); }
+    float vnoise(vec2 p){
+      vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+      float a = hash(i), b = hash(i + vec2(1,0)), c = hash(i + vec2(0,1)), d = hash(i + vec2(1,1));
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+    float fbm(vec2 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++){ s += a * vnoise(p); p *= 2.0; a *= 0.5; } return s; }
+
+    // the flowing green field in aspect-space, returns 0 (white) .. 1 (deep green)
+    float field(vec2 p){
+      float t = iTime * uFlowSpeed;
+      vec2 q = p * uFlowScale;
+      vec2 w = vec2(fbm(q + vec2(1.7, 9.2) + t), fbm(q + vec2(8.3, 2.8) - t));
+      float n = fbm(q + uWarp * w + vec2(0.0, t * 0.6));
+      // a slow large-scale diagonal mass that drifts, pooling green toward one corner
+      float diag = 0.5 + 0.5 * sin((p.x - p.y) * 0.7 + t * 0.8);
+      float g = mix(n, diag, 0.4);
+      g = (g - 0.5) * uContrast + 0.5 + uGreenBias;
+      return g;
+    }
+
+    vec3 ramp(float g){
+      g = clamp(g, 0.0, 1.0);
+      vec3 c = mix(uLight, uGreen, smoothstep(0.10, 0.70, g));
+      c = mix(c, uDeep, smoothstep(0.66, 1.05, g));
+      return c;
+    }
+
+    // signed distance to a rounded box centred at origin
+    float sdRoundBox(vec2 p, vec2 b, float r){
+      vec2 q = abs(p) - b + r;
+      return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+    }
+
+    void main(){
+      vec2 uv = gl_FragCoord.xy / iResolution.xy;
+      vec2 asp = vec2(iResolution.x / iResolution.y, 1.0);
+      vec2 p = uv * asp;
+
+      // pointer carries a soft green glow; movement (uEnergy) brightens it
+      float dm = distance(p, uMouse * asp);
+      float glow = exp(-(dm * dm) / (uGlowRad * uGlowRad)) * (uGlow + uEnergy * 0.6);
+      // click ripples — every active ripple adds its own expanding ring of green
+      for (int i = 0; i < NRIPPLE; i++){
+        float ct = iTime - uRippleT[i];
+        if (ct > 0.0 && ct < 2.2){
+          float rr = distance(p, uRipplePos[i] * asp);
+          glow += exp(-pow((rr - ct * 0.9) * 6.0, 2.0)) * (1.0 - ct / 2.2) * 0.9;
+        }
+      }
+
+      // grid cells
+      vec2 gv = p * uGrid;
+      vec2 cell = floor(gv);
+      vec2 f = fract(gv) - 0.5;
+      vec2 cellCenter = (cell + 0.5) / uGrid;             // aspect-space centre
+
+      // per-tile colour from the field at the cell centre (the mosaic),
+      // continuous field for the soft gradient showing through the seams
+      float jitter = (hash(cell) - 0.5) * 0.06;
+      float gTile = field(cellCenter) + glow + jitter;
+      float gCont = field(p) + glow * 0.85;
+
+      vec3 bg = ramp(gCont);
+      vec3 tileCol = ramp(gTile);
+
+      // frosted-glass body: soft inner lift + a sheen lit from the upper-left
+      float body = 1.0 - smoothstep(0.18, 0.5, length(f));
+      tileCol = mix(tileCol, tileCol * 1.05 + 0.02, body * 0.55);
+      float sheen = smoothstep(0.5, -0.5, f.x + f.y);
+      tileCol += uGloss * sheen * 0.10 * (0.4 + 0.6 * (1.0 - clamp(gTile, 0.0, 1.0)));
+
+      // rounded-tile mask + a bright bevel hugging the edge
+      float rd = sdRoundBox(f, vec2(0.5 - uGap), uRound);
+      float tileMask = smoothstep(uSoft, -uSoft, rd);
+      float bevel = smoothstep(uSoft * 3.0, 0.0, abs(rd + uSoft)) * uSeam;
+
+      vec3 col = mix(bg, tileCol, tileMask);
+      col += bevel * 0.16;
+      col *= uBright;
+
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+})
+scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material))
+
+/* ---------- INTERACTION ---------- */
+let energyTarget = 0
+const mouseTarget = new THREE.Vector2(0.7, 0.4)
+window.addEventListener('pointermove', e => {
+  const nx = e.clientX / window.innerWidth
+  const ny = 1.0 - e.clientY / window.innerHeight
+  energyTarget = Math.min(1, energyTarget + Math.hypot(nx - mouseTarget.x, ny - mouseTarget.y) * 3.5)
+  mouseTarget.set(nx, ny)
+}, { passive: true })
+window.addEventListener('pointerdown', e => {
+  ripplePos[rippleIdx].set(e.clientX / window.innerWidth, 1.0 - e.clientY / window.innerHeight)
+  rippleT[rippleIdx] = performance.now() / 1000
+  rippleIdx = (rippleIdx + 1) % NRIPPLE          // cycle slots so rapid clicks coexist
+  energyTarget = 1
+}, { passive: true })
+
+/* ---------- CONFIG → uniforms ---------- */
+function applyConfig() {
+  uniforms.uLight.value.copy(hexToVec3(CONFIG.colLight))
+  uniforms.uGreen.value.copy(hexToVec3(CONFIG.colGreen))
+  uniforms.uDeep.value.copy(hexToVec3(CONFIG.colDeep))
+  uniforms.uGrid.value = CONFIG.grid
+  uniforms.uRound.value = CONFIG.rounding
+  uniforms.uGap.value = CONFIG.gap
+  uniforms.uSoft.value = CONFIG.edgeSoft
+  uniforms.uFlowSpeed.value = CONFIG.flowSpeed
+  uniforms.uFlowScale.value = CONFIG.flowScale
+  uniforms.uWarp.value = CONFIG.warp
+  uniforms.uGreenBias.value = CONFIG.greenBias
+  uniforms.uContrast.value = CONFIG.contrast
+  uniforms.uGloss.value = CONFIG.gloss
+  uniforms.uSeam.value = CONFIG.seam
+  uniforms.uGlow.value = CONFIG.glowAmt
+  uniforms.uGlowRad.value = CONFIG.glowRadius
+  uniforms.uBright.value = CONFIG.brightness
+}
+
+/* ---------- RESIZE ---------- */
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
+  renderer.setSize(w, h, false)
+  uniforms.iResolution.value.set(canvas.width, canvas.height)
+}
+window.addEventListener('resize', resize); resize()
+
+/* ---------- RENDER LOOP ---------- */
+let first = false
+function render() {
+  requestAnimationFrame(render)
+  energyTarget *= 0.93
+  uniforms.uEnergy.value += (energyTarget - uniforms.uEnergy.value) * 0.1
+  uniforms.uMouse.value.lerp(mouseTarget, 0.08)
+  uniforms.iTime.value = performance.now() / 1000
+  renderer.render(scene, camera)
+  if (!first) { first = true; try { parent.postMessage({ gl: 1, type: 'ready' }, '*') } catch (e) {} }
+}
+render()
+
+/* ===== UI (remove this block to drop the panel) ===== */
+function setupColorUI(config, apply) {
+  const panel = document.getElementById('ui-panel')
+  const toggle = document.getElementById('ui-toggle')
+  const body = document.getElementById('ui-body')
+  if (!panel) return
+  toggle.addEventListener('click', () => panel.classList.toggle('-open'))
+  const _apply = apply
+  apply = () => { _apply(); saveConfig(); renderSnapshot(config) }
+  const numericRanges = {
+    grid:        { min: 4,     max: 30,   step: 1 },
+    rounding:    { min: 0,     max: 0.5,  step: 0.01 },
+    gap:         { min: 0,     max: 0.3,  step: 0.005 },
+    edgeSoft:    { min: 0.002, max: 0.1,  step: 0.002 },
+    flowSpeed:   { min: 0,     max: 0.6,  step: 0.005 },
+    flowScale:   { min: 0.3,   max: 5,    step: 0.05 },
+    warp:        { min: 0,     max: 3,    step: 0.02 },
+    greenBias:   { min: -0.5,  max: 0.5,  step: 0.01 },
+    contrast:    { min: 0.4,   max: 2.5,  step: 0.02 },
+    gloss:       { min: 0,     max: 1.5,  step: 0.02 },
+    seam:        { min: 0,     max: 1,    step: 0.02 },
+    glowAmt:     { min: 0,     max: 1.5,  step: 0.02 },
+    glowRadius:  { min: 0.05,  max: 1,    step: 0.01 },
+    brightness:  { min: 0.5,   max: 1.5,  step: 0.01 },
+  }
+  for (const key of Object.keys(config)) {
+    const v = config[key]
+    const row = document.createElement('label')
+    row.appendChild(Object.assign(document.createElement('span'), { textContent: key }))
+    if (typeof v === 'string' && v[0] === '#') {
+      const inp = document.createElement('input')
+      inp.type = 'color'; inp.value = v
+      inp.addEventListener('input', e => { config[key] = e.target.value; apply() })
+      row.appendChild(inp)
+    } else if (typeof v === 'number') {
+      const r = numericRanges[key] || { min: 0, max: Math.max(1, v * 2), step: 0.01 }
+      const inp = document.createElement('input')
+      inp.type = 'range'; inp.min = String(r.min); inp.max = String(r.max); inp.step = String(r.step); inp.value = String(v)
+      inp.addEventListener('input', e => {
+        let val = parseFloat(e.target.value)
+        if (Number.isInteger(r.step)) val = Math.round(val / r.step) * r.step
+        config[key] = val
+        apply()
+      })
+      row.appendChild(inp)
+    }
+    body.appendChild(row)
+  }
+  const btns = document.createElement('div'); btns.id = 'ui-buttons'
+  const reloadBtn = document.createElement('button'); reloadBtn.type = 'button'; reloadBtn.textContent = '⟳ reload'
+  const resetBtn  = document.createElement('button'); resetBtn.type = 'button'; resetBtn.textContent = '↺ reset'
+  reloadBtn.title = 'Reload the page — re-initialise the scene with the saved settings'
+  resetBtn.title = 'Clear saved settings and reload with defaults'
+  reloadBtn.addEventListener('click', () => location.reload())
+  resetBtn.addEventListener('click', () => { try { localStorage.removeItem(STORAGE_KEY) } catch (e) {} ; location.reload() })
+  btns.appendChild(reloadBtn); btns.appendChild(resetBtn)
+  body.appendChild(btns)
+  panel.classList.add('-open')
+  renderSnapshot(config)
+}
+function renderSnapshot(config) {
+  const snap = document.getElementById('ui-snapshot')
+  if (!snap) return
+  const lines = ['const CONFIG = {']
+  for (const key of Object.keys(config)) {
+    const v = config[key]
+    let formatted
+    if (typeof v === 'string') formatted = "'" + v + "'"
+    else if (Number.isInteger(v)) formatted = String(v)
+    else formatted = String(parseFloat(v.toFixed(4)))
+    lines.push('  ' + key + ': ' + formatted + ',')
+  }
+  lines.push('}')
+  snap.textContent = lines.join('\n')
+}
+applyConfig()
+/* панель отключена во встроенной сцене */
+/* ===== END UI ===== */
+</script>
+</body>
+</html>
