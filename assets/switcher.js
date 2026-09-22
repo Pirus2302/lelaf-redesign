@@ -1,11 +1,13 @@
-// Переключатель вариантов для показа клиенту: одна плашка на всех трёх прототипах
+// Переключатель вариантов для показа клиенту: одна плашка на всех прототипах
 (() => {
   const items = [
     { id: 'v1', label: '1', title: 'Вариант 1 – Чистый' },
     { id: 'v2', label: '2', title: 'Вариант 2 – Тёплый редакционный' },
-    { id: 'wow', label: 'WOW', title: 'Вариант WOW – Полотно за курсором' },
+    { id: 'wow', label: 'WOW 1', title: 'WOW 1 – Живое полотно (тёмный)' },
+    { id: 'wow2', label: 'WOW 2', title: 'WOW 2 – Полотно за курсором (светлый)' },
   ]
-  const current = items.find(i => location.pathname.includes('/' + i.id + '/'))
+  // wow2 проверяем раньше wow, иначе путь /wow2/ совпадёт с обоими
+  const current = items.slice().reverse().find(i => location.pathname.includes('/' + i.id + '/'))
   const dark = document.documentElement.dataset.switcher === 'dark'
 
   const css = document.createElement('style')
@@ -16,12 +18,17 @@
     border:1px solid ${dark ? 'rgba(255,255,255,.18)' : 'rgba(27,35,29,.14)'};
     backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);box-shadow:0 8px 30px rgba(0,0,0,.12)}
   .vsw a{display:inline-flex;align-items:center;justify-content:center;min-width:36px;height:36px;padding:0 12px;border-radius:999px;
-    color:inherit;text-decoration:none;opacity:.6;transition:opacity .2s,background .2s}
+    color:inherit;text-decoration:none;opacity:.6;transition:opacity .2s,background .2s;white-space:nowrap}
   .vsw a:hover{opacity:1;background:${dark ? 'rgba(255,255,255,.1)' : 'rgba(27,35,29,.07)'}}
   .vsw a[aria-current]{opacity:1;background:${dark ? '#fff' : '#2e4435'};color:${dark ? '#0a1413' : '#fff'}}
   .vsw span{padding:0 8px 0 12px;opacity:.55;font-weight:500}
   .vsw .all{font-size:16px;padding:0 10px}
-  @media (max-width:760px){.vsw{left:10px;bottom:12px}.vsw span{display:none}}
+  .vsw{transition:opacity .25s}
+  .vsw.top{top:104px;bottom:auto;left:clamp(16px,3.4vw,48px)}
+  ${dark ? '@media (max-width:1180px){.vsw{bottom:88px}}' : ''}
+  @media (max-width:760px){.vsw{left:10px;bottom:${dark ? '88px' : '12px'};font-size:11px}
+    .vsw a{min-width:30px;height:32px;padding:0 9px}
+    .vsw span{display:none}.vsw.top{top:84px;left:14px}}
   @media print{.vsw{display:none}}`
   document.head.appendChild(css)
 
@@ -41,4 +48,16 @@
   })
   document.body.appendChild(bar)
 
+  // тёмный WOW: первый экран занят по низу – пока нижняя навигация скрыта, плашка стоит под шапкой
+  const dock = document.getElementById('dock')
+  if (dark && dock) {
+    const place = () => {
+      const top = !dock.classList.contains('on')
+      if (bar.classList.contains('top') === top) return
+      bar.style.opacity = '0'
+      setTimeout(() => { bar.classList.toggle('top', top); bar.style.opacity = '' }, 250)
+    }
+    bar.classList.add('top')
+    new MutationObserver(place).observe(dock, { attributes: true, attributeFilter: ['class'] })
+  }
 })()
